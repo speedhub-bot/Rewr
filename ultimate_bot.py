@@ -7,6 +7,9 @@ Features: Inbox, Rewards, Xbox Codes, Multi-threading, File Upload, Beautiful UI
 
 import re, json, uuid, sqlite3, logging, asyncio, time, io, os
 from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv()
 from typing import Dict, List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests, urllib3
@@ -20,8 +23,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # Bot Configuration
-BOT_TOKEN = "8544623193:AAGB5p8qqnkPbsmolPkKVpAGW7XmWdmFOak"
-ADMIN_ID = 5944410248
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 DB_FILE = "ultimate.db"
 
 # Global stats
@@ -585,11 +588,17 @@ async def process_accounts(u, c, accs, uid):
     # Create progress message
     progress_msg = await u.message.reply_text("📊 *Progress: 0%*\nChecked: 0\nCPM: 0", parse_mode=ParseMode.MARKDOWN)
     
-    async def check_account(email, pwd):
-        await stats.increment('checked')
+    def sync_check(email, pwd):
+        """Synchronous check logic to run in executor"""
         checker = Checker(settings['inbox'], settings['rewards'], settings['xbox'], settings['keywords'])
         res = checker.check(email, pwd)
         db.save_result(uid, email, res['status'], res['inbox'], res['points'], res['codes'])
+        return res
+
+    async def check_account(executor, loop, email, pwd):
+        await stats.increment('checked')
+        # Run the blocking sync_check in the thread pool
+        res = await loop.run_in_executor(executor, sync_check, email, pwd)
         
         if res['status'] == 'hit':
             await stats.increment('hits')
@@ -631,11 +640,10 @@ async def process_accounts(u, c, accs, uid):
                 pass
     
     # Process with threading
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     with ThreadPoolExecutor(max_workers=threads) as executor:
-        tasks = [loop.run_in_executor(executor, lambda a=acc: asyncio.run(check_account(a[0], a[1]))) for acc in accs]
-        for task in asyncio.as_completed(tasks):
-            await task
+        tasks = [check_account(executor, loop, acc[0], acc[1]) for acc in accs]
+        await asyncio.gather(*tasks)
     
     # Final update
     await progress_msg.edit_text(
@@ -774,6 +782,9 @@ async def settings_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 def main():
     logger.info("🚀 Ultimate Checker Bot Starting...")
+    if not BOT_TOKEN:
+        logger.error("❌ BOT_TOKEN not set!")
+        return
     app = Application.builder().token(BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
@@ -784,8 +795,8 @@ def main():
     app.add_handler(CommandHandler("stats", stats_cmd))
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.Document.FileExtension("txt"), handle_file))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'^!'), admin_cmd))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'^!'), settings_cmd))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'^!'), admin_cmd), group=1)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'^!'), settings_cmd), group=2)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^!'), handle_accounts))
     
     logger.info("✅ Bot Running!")
