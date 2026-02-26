@@ -23,8 +23,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # Bot Configuration
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8544623193:AAGB5p8qqnkPbsmolPkKVpAGW7XmWdmFOak")
-ADMIN_ID = int(os.getenv("ADMIN_ID", 5944410248))
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 DB_FILE = "ultimate.db"
 
 # Global stats
@@ -795,6 +795,9 @@ async def handle_input_commands(u: Update, c: ContextTypes.DEFAULT_TYPE):
             return
 
 def main():
+    if not BOT_TOKEN:
+        logger.error("❌ BOT_TOKEN not found in environment variables!")
+        return
     logger.info("🚀 Ultimate Checker Bot Starting...")
     app = Application.builder().token(BOT_TOKEN).build()
     

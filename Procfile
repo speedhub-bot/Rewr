@@ -1,1 +1,1 @@
-worker: python ultimate_bot.py
+worker: python3 ultimate_bot.py
