@@ -1,8 +1,2 @@
-[phases.setup]
-nixPkgs = ["python311"]
-
-[phases.install]
-cmds = ["python -m venv /opt/venv && /opt/venv/bin/pip install -r requirements.txt"]
-
 [start]
-cmd = "/opt/venv/bin/python ultimate_bot.py"
+cmd = "python3 ultimate_bot.py"
