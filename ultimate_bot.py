@@ -23,8 +23,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # Bot Configuration
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+BOT_TOKEN = os.getenv("8544623193:AAGB5p8qqnkPbsmolPkKVpAGW7XmWdmFOak")
+ADMIN_ID = int(os.getenv("5944410248", "0"))
 DB_FILE = "ultimate.db"
 
 # Global stats
